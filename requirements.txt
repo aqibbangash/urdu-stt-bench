@@ -1,9 +1,7 @@
 # Urdu STT Benchmark — Python dependencies.
-#
-# Tested on Python 3.10 / 3.11 on Apple Silicon.
-# Comment out engine groups you do not need.
+# Single engine: faster-whisper (CTranslate2) on CPU. Identical to
+# requirements-cpu.txt — the Dockerfile uses that one explicitly.
 
-# ── Core (always required) ───────────────────────────────────────────
 streamlit>=1.31,<2.0
 PyYAML>=6.0
 psutil>=5.9
@@ -11,26 +9,4 @@ pandas>=2.0
 huggingface_hub>=0.23
 numpy>=1.24,<2.0
 python-dotenv>=1.0
-
-# ── Engine: faster-whisper (CT2-based, CPU on Apple Silicon) ─────────
 faster-whisper>=1.0.0
-
-# ── Engine: lightning-whisper-mlx (Apple Silicon accelerated) ────────
-# Skip on Intel Macs — won't install. Comment out if not on Apple Silicon.
-lightning-whisper-mlx>=0.0.10
-mlx>=0.15
-
-# ── Engine: transformers / wav2vec2 / MMS ────────────────────────────
-transformers>=4.41
-torch>=2.2
-torchaudio>=2.2
-soundfile>=0.12
-librosa>=0.10
-
-# ── Engine: whisper.cpp (optional, bring your own .bin) ──────────────
-# Uncomment if you want the whisper.cpp engine.
-# pywhispercpp>=1.2
-
-# ── Optional: ffmpeg-python wrapper (we shell out instead, so this is
-# only here as a fallback). Comment out to keep things slim.
-# ffmpeg-python>=0.2

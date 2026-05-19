@@ -1,13 +1,8 @@
-"""Model registry — turn a YAML entry into an STTEngine instance.
+"""Model registry — resolve an engine type string to its STTEngine class.
 
-To add a new engine type:
-  1. Implement the adapter under stt/engines/<engine>_engine.py
-  2. Add an entry to ENGINE_TYPES below mapping the YAML `engine:` value to
-     a `(module, class)` pair.
-
-The lazy-import dance keeps the app usable when some engines' optional
-heavy deps (mlx, torch, faster-whisper) aren't installed — we only attempt
-to import an engine when the user actually selects a model that uses it.
+Single-engine build: only faster-whisper is shipped. To add another engine
+(e.g. a CUDA path, or whisper.cpp), drop the adapter under
+`stt/engines/<engine>_engine.py` and add an entry to `ENGINE_TYPES`.
 """
 from __future__ import annotations
 
@@ -21,11 +16,7 @@ from .base import STTEngine
 
 # YAML `engine:` value  →  (module name relative to stt.engines, class name)
 ENGINE_TYPES: dict[str, tuple[str, str]] = {
-    "lightning-whisper-mlx": ("mlx_whisper_engine", "MLXWhisperEngine"),
     "faster-whisper": ("faster_whisper_engine", "FasterWhisperEngine"),
-    "transformers": ("transformers_engine", "TransformersASREngine"),
-    "mms": ("mms_engine", "MMSEngine"),
-    "whisper-cpp": ("whisper_cpp_engine", "WhisperCppEngine"),
 }
 
 

@@ -1,18 +1,17 @@
-"""Streamlit entry point for the Urdu STT Benchmark — single-model workflow.
+"""Streamlit entry point for the Urdu STT Benchmark — single engine, pure CPU.
+
+Pick any faster-whisper / CTranslate2 model from the sidebar:
+  - Standard size shortcuts: tiny / base / small / medium / large-v3
+  - Any Hugging Face repo id, e.g. deepdml/faster-whisper-large-v3-turbo-ct2
 
 Flow:
   1. Upload audio/video.
-  2. Pick one model.
-  3. Click "Load model" — weights pull into RAM. Live stats + log pane show
-     elapsed time, current RSS, CPU, and library log lines.
-  4. Click "Run inference" — transcribe runs in a background thread. Live
-     stats + log pane update. For faster-whisper, segments stream in as they
-     decode.
-  5. Final card shows load time, inference time, RTF, peak RAM during
-     inference, full transcript, and per-segment timing.
+  2. Configure model in the sidebar (size or HF repo id, compute type, …).
+  3. Click "Load model" — weights pull into RAM. Live stats + log pane.
+  4. Click "Run inference" — transcribe streams segments as they decode.
+  5. Result card shows load time, inference time, RTF, peak RAM, transcript.
 
-Pure CPU is the design target (see models.yaml). The transformers / MMS
-engines accept `device: cpu` in their YAML params.
+Pure CPU is the target — faster-whisper / ctranslate2 on Linux x86_64.
 """
 from __future__ import annotations
 
@@ -32,15 +31,14 @@ import psutil
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load .env (HF_TOKEN, etc.) before any huggingface_hub / transformers import path runs.
+# Load .env (HF_TOKEN, etc.) before huggingface_hub / faster_whisper imports.
 load_dotenv(Path(__file__).parent / ".env")
 
-from stt.audio import extract_audio, probe_duration
 from stt.base import Segment, Transcription
 from stt.metrics import ResourceTracker
-from stt.registry import availability_status, instantiate, load_registry
+from stt.engines.faster_whisper_engine import FasterWhisperEngine
+from stt.audio import extract_audio, probe_duration
 
-# Quieter HF hub progress bars in stderr — we surface logger events instead.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
 st.set_page_config(
@@ -50,13 +48,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-REGISTRY_PATH = Path(__file__).parent / "models.yaml"
-
 
 # ── Logging plumbing ────────────────────────────────────────────────────
 class QueueLogHandler(logging.Handler):
-    """Push every log record into a thread-safe queue for the UI to drain."""
-
     def __init__(self, q: "queue.Queue[str]") -> None:
         super().__init__()
         self.q = q
@@ -72,8 +66,7 @@ class QueueLogHandler(logging.Handler):
 def _install_log_handler(q: "queue.Queue[str]") -> QueueLogHandler:
     handler = QueueLogHandler(q)
     handler.setLevel(logging.INFO)
-    # Capture from libs that actually log meaningful events.
-    for name in ("huggingface_hub", "faster_whisper", "transformers", "ctranslate2"):
+    for name in ("huggingface_hub", "faster_whisper", "ctranslate2"):
         lg = logging.getLogger(name)
         lg.setLevel(logging.INFO)
         lg.addHandler(handler)
@@ -81,7 +74,7 @@ def _install_log_handler(q: "queue.Queue[str]") -> QueueLogHandler:
 
 
 def _remove_log_handler(handler: QueueLogHandler) -> None:
-    for name in ("huggingface_hub", "faster_whisper", "transformers", "ctranslate2"):
+    for name in ("huggingface_hub", "faster_whisper", "ctranslate2"):
         logging.getLogger(name).removeHandler(handler)
 
 
@@ -118,7 +111,7 @@ def _ss(key: str, default: Any = None) -> Any:
 
 
 _ss("engine", None)
-_ss("engine_label", None)
+_ss("loaded_config", None)
 _ss("load_result", None)
 _ss("infer_result", None)
 _ss("audio_path", None)
@@ -127,50 +120,76 @@ _ss("media_basename", None)
 _ss("history", [])
 
 
-# ── Sidebar: model registry ─────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def _cached_registry(mtime: float) -> dict[str, Any]:
-    return load_registry(REGISTRY_PATH)
-
-
-registry = _cached_registry(REGISTRY_PATH.stat().st_mtime)
-models = registry.get("models", [])
-
+# ── Sidebar: pick any faster-whisper model on the fly ───────────────────
 st.sidebar.header("Model")
-st.sidebar.caption(f"{len(models)} registered · edit models.yaml to add more")
 
-available_models = []
-for m in models:
-    ok, hint = availability_status(m.get("engine", "?"))
-    available_models.append((m, ok, hint))
-
-selectable = [(m, ok, hint) for (m, ok, hint) in available_models if ok]
-if not selectable:
-    st.sidebar.error("No engines available. See requirements.txt.")
-    st.stop()
-
-labels = [m["name"] for (m, _, _) in selectable]
-current_label = _ss("engine_label") or labels[0]
-if current_label not in labels:
-    current_label = labels[0]
-chosen_label = st.sidebar.radio(
-    "Pick one model",
-    labels,
-    index=labels.index(current_label),
-    key="model_radio",
+QUICK_PICKS = [
+    "(custom)",
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v3",
+    "deepdml/faster-whisper-large-v3-turbo-ct2",
+    "Systran/faster-distil-whisper-large-v3",
+]
+pick = st.sidebar.selectbox(
+    "Quick pick",
+    QUICK_PICKS,
+    index=3,  # small
+    help="Pick a preset or choose (custom) and type any HF repo id below.",
 )
-chosen = next(m for (m, _, _) in selectable if m["name"] == chosen_label)
-st.sidebar.caption(chosen.get("description", ""))
+default_model = "" if pick == "(custom)" else pick
+model_size = st.sidebar.text_input(
+    "Model size or HF repo id",
+    value=default_model,
+    placeholder="tiny / small / large-v3 / org/repo-ct2",
+    help=(
+        "Size shortcuts: tiny, base, small, medium, large-v2, large-v3. "
+        "Or any Hugging Face repo id hosting a CTranslate2-converted model."
+    ),
+)
+if not model_size.strip():
+    model_size = "small"
 
-# Surface unavailable models for visibility.
-unavailable = [(m, hint) for (m, ok, hint) in available_models if not ok]
-if unavailable:
-    with st.sidebar.expander(f"Unavailable ({len(unavailable)})"):
-        for m, hint in unavailable:
-            st.markdown(f"**{m['name']}** — {hint}")
+compute_type = st.sidebar.selectbox(
+    "Compute type",
+    ["int8", "int8_float16", "float16", "float32"],
+    index=0,
+    help="int8 is smallest+fastest on CPU. float32 is highest fidelity, multi-GB.",
+)
 
-# If the user switches model, drop any loaded engine so RAM doesn't pile up.
-if st.session_state["engine_label"] != chosen_label and st.session_state["engine"] is not None:
+with st.sidebar.expander("Advanced"):
+    beam_size = st.number_input("Beam size", 1, 10, 5, step=1)
+    vad_filter = st.checkbox(
+        "VAD filter (silero)", value=True,
+        help="Skip silence via silero VAD. Usually a quality win, slightly slower.",
+    )
+    language = st.text_input(
+        "Language code", value="ur",
+        help="ISO 639-1 (e.g. ur, en, ar). Faster-whisper uses this to skip lang-detect.",
+    )
+
+active_config = {
+    "model_size": model_size.strip(),
+    "compute_type": compute_type,
+    "beam_size": int(beam_size),
+    "vad_filter": bool(vad_filter),
+}
+chosen_label = f"faster-whisper {active_config['model_size']} ({active_config['compute_type']}, CPU)"
+
+st.sidebar.divider()
+st.sidebar.caption(
+    "Engine: faster-whisper (CTranslate2) on CPU. Models pulled from Hugging Face "
+    "on first load and cached at `$HF_HOME` (persistent across container restarts)."
+)
+
+# Drop engine if config changes so RAM isn't pinned to the wrong model.
+if (
+    st.session_state["loaded_config"] is not None
+    and st.session_state["loaded_config"] != active_config
+    and st.session_state["engine"] is not None
+):
     try:
         st.session_state["engine"].unload()
     except Exception:  # noqa: BLE001
@@ -178,27 +197,26 @@ if st.session_state["engine_label"] != chosen_label and st.session_state["engine
     st.session_state["engine"] = None
     st.session_state["load_result"] = None
     st.session_state["infer_result"] = None
+    st.session_state["loaded_config"] = None
     gc.collect()
-st.session_state["engine_label"] = chosen_label
 
 
-# ── Header ─────────────────────────────────────────────────────────────
+# ── Header + process stats ──────────────────────────────────────────────
 st.title("Urdu STT Benchmark")
 st.caption(
-    "Pure-CPU offline Urdu speech-to-text. Load a model, run inference, "
+    "Pure-CPU offline speech-to-text via faster-whisper. Pick any HF model from the sidebar; "
     "compare load time, inference time, RAM, and RTF across runs."
 )
 
-# Always-visible process stats strip.
-strip = st.columns(4)
 proc = psutil.Process(os.getpid())
+strip = st.columns(4)
 strip[0].metric("Process RSS (MB)", f"{proc.memory_info().rss / 1024**2:.0f}")
 strip[1].metric("System CPU %", f"{psutil.cpu_percent(interval=None):.0f}")
 strip[2].metric("System RAM used %", f"{psutil.virtual_memory().percent:.0f}")
 strip[3].metric("Cores", f"{psutil.cpu_count(logical=False)}P / {psutil.cpu_count(logical=True)}L")
 
 
-# ── Upload ─────────────────────────────────────────────────────────────
+# ── Upload ──────────────────────────────────────────────────────────────
 st.subheader("1. Audio")
 upload = st.file_uploader(
     "Upload a video or audio file",
@@ -219,7 +237,6 @@ if upload is not None and upload.name != st.session_state.get("media_basename"):
             st.session_state["audio_path"] = str(audio_path)
             st.session_state["audio_seconds"] = float(audio_seconds)
             st.session_state["media_basename"] = upload.name
-            # Reset inference result whenever audio changes.
             st.session_state["infer_result"] = None
         except Exception as exc:  # noqa: BLE001
             st.error(f"Audio extraction failed: {exc}")
@@ -234,7 +251,7 @@ else:
     st.info("Upload an audio or video file to begin.")
 
 
-# ── Background runner ──────────────────────────────────────────────────
+# ── Background runner with live UI ──────────────────────────────────────
 def _run_threaded_with_live_ui(
     target_fn,
     *,
@@ -245,10 +262,6 @@ def _run_threaded_with_live_ui(
     log_placeholder,
     poll_seconds: float = 0.5,
 ) -> Any:
-    """Run target_fn() on a worker thread; meanwhile update placeholders with
-    live elapsed/RSS/CPU/log lines. Returns whatever target_fn returns, or
-    re-raises its exception."""
-
     result_box: dict[str, Any] = {}
 
     def _worker():
@@ -270,7 +283,6 @@ def _run_threaded_with_live_ui(
             cols[1].metric("Elapsed (s)", f"{elapsed:.1f}")
             cols[2].metric("Current RSS (MB)", f"{tracker.current_rss_mb:.0f}")
             cols[3].metric("Last CPU %", f"{tracker.last_cpu:.0f}")
-        # Drain queue.
         drained = False
         while True:
             try:
@@ -286,7 +298,6 @@ def _run_threaded_with_live_ui(
             )
         time.sleep(poll_seconds)
 
-    # Final drain.
     while True:
         try:
             log_lines.append(log_q.get_nowait())
@@ -306,7 +317,7 @@ def _run_threaded_with_live_ui(
     return result_box.get("value")
 
 
-# ── Load / Run controls ────────────────────────────────────────────────
+# ── Load / Run controls ─────────────────────────────────────────────────
 st.subheader("2. Load model")
 load_col1, load_col2, load_col3 = st.columns([1, 1, 1])
 load_btn = load_col1.button(
@@ -336,6 +347,7 @@ if unload_btn and st.session_state["engine"] is not None:
     st.session_state["engine"] = None
     st.session_state["load_result"] = None
     st.session_state["infer_result"] = None
+    st.session_state["loaded_config"] = None
     gc.collect()
     st.success("Model unloaded.")
 
@@ -348,11 +360,20 @@ if load_btn:
     tracker = ResourceTracker()
     tracker.start()
     rss_before = tracker.current_rss_mb
-    log_q.put(f"[ui] Instantiating engine '{chosen_label}'…")
+    log_q.put(f"[ui] Instantiating FasterWhisperEngine for '{active_config['model_size']}'")
+
+    cfg_for_load = dict(active_config)
 
     def _do_load():
-        engine = instantiate(chosen)
-        log_q.put(f"[ui] Calling load() on {type(engine).__name__}")
+        engine = FasterWhisperEngine(
+            name=chosen_label,
+            model_size=cfg_for_load["model_size"],
+            compute_type=cfg_for_load["compute_type"],
+            device="cpu",
+            beam_size=cfg_for_load["beam_size"],
+            vad_filter=cfg_for_load["vad_filter"],
+        )
+        log_q.put(f"[ui] Calling load() — cpu_threads={engine.cpu_threads}")
         engine.load()
         log_q.put("[ui] load() returned")
         return engine
@@ -370,6 +391,7 @@ if load_btn:
         load_seconds = time.time() - t0
         tracker.stop()
         st.session_state["engine"] = engine
+        st.session_state["loaded_config"] = active_config
         st.session_state["load_result"] = LoadResult(
             seconds=load_seconds,
             rss_before_mb=rss_before,
@@ -384,7 +406,6 @@ if load_btn:
     finally:
         _remove_log_handler(handler)
 
-# Load-result card.
 if st.session_state["load_result"] is not None:
     lr: LoadResult = st.session_state["load_result"]
     with st.container(border=True):
@@ -396,7 +417,7 @@ if st.session_state["load_result"] is not None:
         c[3].metric("Process RSS now (MB)", f"{proc.memory_info().rss / 1024**2:.0f}")
 
 
-# ── Inference ──────────────────────────────────────────────────────────
+# ── Inference ───────────────────────────────────────────────────────────
 st.subheader("3. Run inference")
 can_infer = (
     st.session_state["engine"] is not None
@@ -422,30 +443,24 @@ if infer_btn and can_infer:
     audio_seconds = st.session_state["audio_seconds"]
 
     streamed_segments: list[Segment] = []
-    streamed_text_parts: list[str] = []
     text_lock = threading.Lock()
+    lang_for_infer = language.strip() or "ur"
 
     def _on_segment(seg: Segment) -> None:
         with text_lock:
             streamed_segments.append(seg)
-            streamed_text_parts.append(seg.text)
             log_q2.put(
                 f"[seg {len(streamed_segments):>3}] "
                 f"[{seg.start:6.2f}–{seg.end:6.2f}] {seg.text[:80]}"
             )
 
-    # Capture the engine in the main thread — st.session_state is not safe
-    # to access from the background worker thread.
     engine_for_infer = st.session_state["engine"]
 
     def _do_infer():
-        if hasattr(engine_for_infer, "transcribe_stream"):
-            log_q2.put("[ui] transcribe_stream(): streaming segments as they decode")
-            return engine_for_infer.transcribe_stream(
-                audio_path, language="ur", on_segment=_on_segment
-            )
-        log_q2.put("[ui] transcribe(): no streaming path on this engine")
-        return engine_for_infer.transcribe(audio_path, language="ur")
+        log_q2.put(f"[ui] transcribe_stream(): language={lang_for_infer}")
+        return engine_for_infer.transcribe_stream(
+            audio_path, language=lang_for_infer, on_segment=_on_segment
+        )
 
     try:
         t0 = time.time()
@@ -468,11 +483,10 @@ if infer_btn and can_infer:
             segments_stream=list(streamed_segments),
         )
         st.session_state["infer_result"] = res
-        # Append to history for cross-run comparison.
         st.session_state["history"].append(
             {
-                "model": chosen_label,
-                "engine": chosen.get("engine"),
+                "model": active_config["model_size"],
+                "compute": active_config["compute_type"],
                 "load_s": st.session_state["load_result"].seconds
                 if st.session_state["load_result"] else None,
                 "infer_s": round(infer_seconds, 2),
@@ -498,7 +512,7 @@ if infer_btn and can_infer:
         _remove_log_handler(handler2)
 
 
-# ── Results card ───────────────────────────────────────────────────────
+# ── Result card ─────────────────────────────────────────────────────────
 ir: Optional[InferResult] = st.session_state.get("infer_result")
 if ir is not None and ir.transcription is not None:
     st.subheader("4. Result")
@@ -513,11 +527,7 @@ if ir is not None and ir.transcription is not None:
         m[3].metric("Peak RSS (MB)", f"{ir.peak_rss_mb:.0f}")
         m[4].metric("Avg CPU %", f"{ir.avg_cpu:.0f}")
 
-        st.text_area(
-            "Transcript",
-            ir.transcription.text,
-            height=300,
-        )
+        st.text_area("Transcript", ir.transcription.text, height=300)
 
         slug = chosen_label.replace(" ", "_").replace("/", "_")
         st.download_button(
