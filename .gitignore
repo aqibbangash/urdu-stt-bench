@@ -1,0 +1,16 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.streamlit/
+data/
+models/
+*.wav
+*.mp4
+*.mov
+*.mkv
+*.ts
+*.m4a
+*.mp3
+.DS_Store

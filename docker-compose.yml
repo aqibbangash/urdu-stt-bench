@@ -1,0 +1,52 @@
+# Urdu STT Benchmark — pinned CPU/memory.
+#
+# Defaults: 4 CPUs, 8 GiB RAM. Override per-host:
+#   URDU_STT_CPUS=8 URDU_STT_MEM=16g docker compose up -d
+#
+# Notes:
+#   - The compose file passes URDU_STT_CPUS into OMP/MKL/OPENBLAS/ctranslate2
+#     so every threading layer respects the cap (not just cgroup throttling).
+#   - HF model weights persist in the named volume `hf_cache` (~/.cache/huggingface
+#     equivalent) so restarts don't redownload multi-GB weights.
+#   - HF_TOKEN comes from .env (gitignored). Create it next to this file.
+
+services:
+  urdu-stt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: urdu-stt-bench:latest
+    container_name: urdu-stt
+    restart: unless-stopped
+    ports:
+      - "${URDU_STT_PORT:-8501}:8501"
+    env_file:
+      - .env
+    environment:
+      # Match thread caps to the cgroup CPU limit. ctranslate2 (faster-whisper)
+      # picks up CT2_NUM_THREADS; everything else honors OMP/MKL/OPENBLAS.
+      OMP_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      MKL_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      OPENBLAS_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      NUMEXPR_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      CT2_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      URDU_STT_CPU_THREADS: "${URDU_STT_CPUS:-4}"
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - hf_cache:/data/hf
+    deploy:
+      resources:
+        limits:
+          cpus: "${URDU_STT_CPUS:-4}"
+          memory: "${URDU_STT_MEM:-8g}"
+    # Streamlit's own healthcheck endpoint.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  hf_cache:
+    name: urdu_stt_hf_cache

@@ -1,0 +1,85 @@
+"""Model registry — turn a YAML entry into an STTEngine instance.
+
+To add a new engine type:
+  1. Implement the adapter under stt/engines/<engine>_engine.py
+  2. Add an entry to ENGINE_TYPES below mapping the YAML `engine:` value to
+     a `(module, class)` pair.
+
+The lazy-import dance keeps the app usable when some engines' optional
+heavy deps (mlx, torch, faster-whisper) aren't installed — we only attempt
+to import an engine when the user actually selects a model that uses it.
+"""
+from __future__ import annotations
+
+import importlib
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .base import STTEngine
+
+# YAML `engine:` value  →  (module name relative to stt.engines, class name)
+ENGINE_TYPES: dict[str, tuple[str, str]] = {
+    "lightning-whisper-mlx": ("mlx_whisper_engine", "MLXWhisperEngine"),
+    "faster-whisper": ("faster_whisper_engine", "FasterWhisperEngine"),
+    "transformers": ("transformers_engine", "TransformersASREngine"),
+    "mms": ("mms_engine", "MMSEngine"),
+    "whisper-cpp": ("whisper_cpp_engine", "WhisperCppEngine"),
+}
+
+
+def load_registry(path: Path) -> dict[str, Any]:
+    """Parse models.yaml. Returns the raw dict."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if "models" not in data or not isinstance(data["models"], list):
+        raise ValueError(f"{path} is missing a top-level `models:` list")
+    return data
+
+
+def _resolve_engine_class(engine_type: str) -> type[STTEngine]:
+    if engine_type not in ENGINE_TYPES:
+        raise ValueError(
+            f"Unknown engine type '{engine_type}'. "
+            f"Known types: {sorted(ENGINE_TYPES)}"
+        )
+    mod_name, cls_name = ENGINE_TYPES[engine_type]
+    module = importlib.import_module(f"stt.engines.{mod_name}")
+    cls = getattr(module, cls_name)
+    return cls
+
+
+def instantiate(model_config: dict[str, Any]) -> STTEngine:
+    """Build an engine instance from one entry in models.yaml."""
+    engine_type = model_config["engine"]
+    name = model_config["name"]
+    params = model_config.get("params") or {}
+    cls = _resolve_engine_class(engine_type)
+    return cls(name=name, **params)
+
+
+def availability_status(engine_type: str) -> tuple[bool, str]:
+    """Best-effort check that the engine's optional deps import.
+
+    Returns (True, "") if importable, else (False, hint).
+    Used by the Streamlit sidebar to grey out unavailable engines.
+    """
+    if engine_type not in ENGINE_TYPES:
+        return False, f"Unknown engine type: {engine_type}"
+    mod_name, _ = ENGINE_TYPES[engine_type]
+    try:
+        importlib.import_module(f"stt.engines.{mod_name}")
+    except ImportError as exc:
+        return False, f"Missing dependency: {exc}. See requirements.txt."
+    # Then check the engine's own availability hook if defined.
+    try:
+        cls = _resolve_engine_class(engine_type)
+        check = getattr(cls, "is_available", None)
+        if callable(check):
+            return check()
+    except ImportError as exc:
+        return False, f"Missing dependency: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Init failed: {exc}"
+    return True, ""

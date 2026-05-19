@@ -1,0 +1,126 @@
+# Urdu STT model registry — pure CPU inference.
+#
+# All entries below run on CPU. MLX (Metal/ANE) entries are kept at the
+# bottom, commented out. Uncomment if you want to revisit GPU/ANE later.
+#
+# Tradeoff cheatsheet (faster-whisper int8, single-threaded, M-series Mac):
+#   tiny      ~75 MB   fastest, lowest quality
+#   base     ~140 MB
+#   small    ~480 MB   sweet spot for many use cases
+#   medium  ~1.5 GB    diminishing returns over small for Urdu
+#   large-v3 ~3 GB     best quality, slowest
+#   large-v3-turbo ~1.6 GB  4-layer decoder, ~4x faster than large-v3,
+#                           quality very close to large-v3.
+
+models:
+  # ── faster-whisper (CTranslate2, int8 CPU) — recommended default path ─
+
+  - name: faster-whisper tiny (int8, CPU)
+    description: Smallest Whisper. ~75 MB, fastest, lowest accuracy. Good smoke-test baseline.
+    engine: faster-whisper
+    params:
+      model_size: tiny
+      compute_type: int8
+      device: cpu
+
+  - name: faster-whisper base (int8, CPU)
+    description: ~140 MB. Still fast, slightly better than tiny.
+    engine: faster-whisper
+    params:
+      model_size: base
+      compute_type: int8
+      device: cpu
+
+  - name: faster-whisper small (int8, CPU)
+    description: ~480 MB. Strong balance of speed/quality for Urdu.
+    engine: faster-whisper
+    params:
+      model_size: small
+      compute_type: int8
+      device: cpu
+
+  - name: faster-whisper medium (int8, CPU)
+    description: ~1.5 GB. Higher accuracy, ~3-4x slower than small on CPU.
+    engine: faster-whisper
+    params:
+      model_size: medium
+      compute_type: int8
+      device: cpu
+
+  - name: faster-whisper large-v3 (int8, CPU)
+    description: ~3 GB. Best Whisper accuracy. Slow on CPU.
+    engine: faster-whisper
+    params:
+      model_size: large-v3
+      compute_type: int8
+      device: cpu
+
+  - name: faster-whisper large-v3-turbo (int8, CPU)
+    description: ~1.6 GB. 4-layer decoder Whisper, ~4x faster than large-v3, near-identical quality. Strong CPU pick.
+    engine: faster-whisper
+    params:
+      model_size: deepdml/faster-whisper-large-v3-turbo-ct2
+      compute_type: int8
+      device: cpu
+
+  # ── Urdu-specific models via transformers (CPU) ───────────────────────
+
+  - name: Meta MMS-1B (Urdu adapter, CPU)
+    description: Meta MMS 1B with the Urdu (urd) language adapter. Urdu-native, ~1.2 GB.
+    engine: mms
+    params:
+      repo_id: facebook/mms-1b-all
+      target_lang: urd
+      device: cpu
+
+  - name: kingabzpro/wav2vec2-large-xls-r-300m-Urdu (CPU)
+    description: Community Urdu fine-tune of XLS-R 300M. ~1.2 GB.
+    engine: transformers
+    params:
+      repo_id: kingabzpro/wav2vec2-large-xls-r-300m-Urdu
+      device: cpu
+
+  - name: Anwarkh1/whisper-small-Urdu (CPU)
+    description: Whisper-small fine-tuned on Urdu by Anwarkh1. ~480 MB, transformers path.
+    engine: transformers
+    params:
+      repo_id: Anwarkh1/whisper-small-Urdu
+      device: cpu
+      chunk_length_s: 30.0
+
+  - name: kingabzpro/whisper-large-v3-urdu (CPU)
+    description: Whisper-large-v3 LoRA-merged on Urdu by kingabzpro. Transformers path.
+    engine: transformers
+    params:
+      repo_id: kingabzpro/whisper-large-v3-urdu
+      device: cpu
+      chunk_length_s: 30.0
+
+  # ── MLX / Apple Silicon entries (commented — uncomment for GPU/ANE) ───
+  # - name: Whisper Large-v3 (MLX)
+  #   engine: lightning-whisper-mlx
+  #   params:
+  #     model_size: large-v3
+  #     quant: null
+  #     batch_size: 12
+  #
+  # - name: Whisper Large-v3 (MLX, 4-bit)
+  #   engine: lightning-whisper-mlx
+  #   params:
+  #     model_size: large-v3
+  #     quant: "4bit"
+  #     batch_size: 12
+  #
+  # - name: Whisper Medium (MLX)
+  #   engine: lightning-whisper-mlx
+  #   params:
+  #     model_size: medium
+  #     quant: null
+  #     batch_size: 12
+
+  # ── whisper.cpp (optional, bring your own .bin) ───────────────────────
+  # - name: whisper.cpp Large-v3 (CPU)
+  #   engine: whisper-cpp
+  #   params:
+  #     model_file: models/whisper-cpp/ggml-large-v3.bin
+  #     n_threads: 8

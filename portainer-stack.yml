@@ -1,0 +1,67 @@
+# Urdu STT Benchmark — Portainer stack (Docker Swarm compatible)
+#
+# Usage in Portainer:
+#   1. Stacks → Add stack → "Web editor"
+#   2. Paste this whole file
+#   3. In "Environment variables", set:
+#        HF_TOKEN          — your Hugging Face token (required for rate-limit lifts)
+#        URDU_STT_CPUS     — CPU cap, e.g. 4 (default if unset: 4)
+#        URDU_STT_MEM      — memory cap, e.g. 8g (default if unset: 8g)
+#        URDU_STT_PORT     — host port to expose (default: 8501)
+#   4. Deploy the stack
+#
+# Notes:
+#   - Image is pulled from ghcr.io/aqibbangash/urdu-stt-bench:latest (built by the
+#     GitHub Actions workflow in this repo).
+#   - Model weights persist in the named volume `urdu_stt_hf_cache`. Wipe it with
+#     `docker volume rm urdu_stt_hf_cache` if you need a clean slate.
+#   - The CPU cap is enforced two ways:
+#       a) cgroup limit via `deploy.resources.limits.cpus`
+#       b) thread caps inside the process via OMP/MKL/OPENBLAS/CT2_NUM_THREADS
+#          so faster-whisper / numpy / torch don't oversubscribe.
+
+version: "3.8"
+
+services:
+  urdu-stt:
+    image: ghcr.io/aqibbangash/urdu-stt-bench:latest
+    ports:
+      - target: 8501
+        published: ${URDU_STT_PORT:-8501}
+        protocol: tcp
+        mode: ingress
+    environment:
+      HF_TOKEN: ${HF_TOKEN}
+      OMP_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      MKL_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      OPENBLAS_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      NUMEXPR_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      CT2_NUM_THREADS: "${URDU_STT_CPUS:-4}"
+      URDU_STT_CPU_THREADS: "${URDU_STT_CPUS:-4}"
+      TOKENIZERS_PARALLELISM: "false"
+      HF_HOME: "/data/hf"
+    volumes:
+      - urdu_stt_hf_cache:/data/hf
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 5
+      update_config:
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits:
+          cpus: "${URDU_STT_CPUS:-4}"
+          memory: "${URDU_STT_MEM:-8g}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  urdu_stt_hf_cache:
+    name: urdu_stt_hf_cache
